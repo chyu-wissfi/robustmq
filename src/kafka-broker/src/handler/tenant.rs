@@ -12,8 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod broker;
-pub mod core;
-pub mod handler;
-pub mod kafka;
-pub mod server;
+use metadata_struct::tenant::DEFAULT_TENANT;
+
+// Kafka has no tenant concept; every request uses this single tenant for now.
+// Centralized here so multi-tenant support (e.g. mapping from SASL identity)
+// only needs to change this one function.
+pub fn get_tenant() -> &'static str {
+    DEFAULT_TENANT
+}

@@ -111,8 +111,8 @@ impl StorageAdapter for EngineStorageAdapter {
     async fn read_by_keys(
         &self,
         shard: &str,
-        keys: &[&str],
-    ) -> Result<HashMap<String, Vec<StorageRecord>>, CommonError> {
+        keys: &[&[u8]],
+    ) -> Result<HashMap<Vec<u8>, Vec<StorageRecord>>, CommonError> {
         let mut result = HashMap::with_capacity(keys.len());
         for &key in keys {
             let records = self
@@ -120,12 +120,12 @@ impl StorageAdapter for EngineStorageAdapter {
                 .read_by_key(shard, key)
                 .await
                 .map_err(|e| CommonError::CommonError(e.to_string()))?;
-            result.insert(key.to_string(), records);
+            result.insert(key.to_vec(), records);
         }
         Ok(result)
     }
 
-    async fn delete_by_keys(&self, shard: &str, keys: &[&str]) -> Result<(), CommonError> {
+    async fn delete_by_keys(&self, shard: &str, keys: &[&[u8]]) -> Result<(), CommonError> {
         self.adapter
             .delete_by_keys(shard, keys)
             .await
@@ -135,6 +135,17 @@ impl StorageAdapter for EngineStorageAdapter {
     async fn delete_by_offsets(&self, shard: &str, offsets: &[u64]) -> Result<(), CommonError> {
         self.adapter
             .delete_by_offsets(shard, offsets)
+            .await
+            .map_err(|e| CommonError::CommonError(e.to_string()))
+    }
+
+    async fn delete_records_before(
+        &self,
+        shard: &str,
+        target_offset: u64,
+    ) -> Result<u64, CommonError> {
+        self.adapter
+            .delete_records_before(shard, target_offset)
             .await
             .map_err(|e| CommonError::CommonError(e.to_string()))
     }

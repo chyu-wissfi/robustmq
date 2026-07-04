@@ -14,3 +14,4 @@
 
 pub mod cache;
 pub mod command;
+pub mod tenant;

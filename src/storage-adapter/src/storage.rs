@@ -79,12 +79,20 @@ pub trait StorageAdapter {
     async fn read_by_keys(
         &self,
         shard: &str,
-        keys: &[&str],
-    ) -> Result<HashMap<String, Vec<StorageRecord>>, CommonError>;
+        keys: &[&[u8]],
+    ) -> Result<HashMap<Vec<u8>, Vec<StorageRecord>>, CommonError>;
 
-    async fn delete_by_keys(&self, shard: &str, keys: &[&str]) -> Result<(), CommonError>;
+    async fn delete_by_keys(&self, shard: &str, keys: &[&[u8]]) -> Result<(), CommonError>;
 
     async fn delete_by_offsets(&self, shard: &str, offsets: &[u64]) -> Result<(), CommonError>;
+
+    /// Delete all records with offset < `target_offset` (Kafka DeleteRecords
+    /// semantics). Returns the achieved low_watermark.
+    async fn delete_records_before(
+        &self,
+        shard: &str,
+        target_offset: u64,
+    ) -> Result<u64, CommonError>;
 
     async fn get_offset_by_timestamp(
         &self,

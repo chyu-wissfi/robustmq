@@ -14,30 +14,26 @@
 
 use std::sync::Arc;
 
+use crate::handler::tenant::get_tenant;
 use broker_core::cache::NodeCacheManager;
+use kafka_protocol::error::ResponseError;
 use kafka_protocol::messages::metadata_response::{
     MetadataResponseBroker, MetadataResponsePartition, MetadataResponseTopic,
 };
 use kafka_protocol::messages::{MetadataRequest, MetadataResponse, TopicName};
 use kafka_protocol::protocol::StrBytes;
-use metadata_struct::tenant::DEFAULT_TENANT;
 use metadata_struct::topic::Topic;
 use protocol::kafka::packet::KafkaPacket;
-
-const UNKNOWN_TOPIC_OR_PARTITION: i16 = 3;
+use storage_adapter::driver::StorageDriverManager;
 
 pub fn process_metadata(
-    broker_cache: Option<&Arc<NodeCacheManager>>,
+    broker_cache: &Arc<NodeCacheManager>,
+    sdm: &Arc<StorageDriverManager>,
     req: &MetadataRequest,
 ) -> Option<KafkaPacket> {
-    let (topics, brokers, controller_id) = match broker_cache {
-        Some(cache) => (
-            build_topics_from_cache(cache, req),
-            build_brokers_from_cache(cache),
-            pick_controller_id(cache),
-        ),
-        None => (Vec::new(), Vec::new(), 0),
-    };
+    let topics = build_topics_from_cache(broker_cache, sdm, req);
+    let brokers = build_brokers_from_cache(broker_cache);
+    let controller_id = pick_controller_id(broker_cache);
 
     let resp = MetadataResponse::default()
         .with_brokers(brokers)
@@ -81,37 +77,36 @@ fn pick_controller_id(cache: &Arc<NodeCacheManager>) -> i32 {
 
 fn build_topics_from_cache(
     cache: &Arc<NodeCacheManager>,
+    sdm: &Arc<StorageDriverManager>,
     req: &MetadataRequest,
 ) -> Vec<MetadataResponseTopic> {
     let requested = req.topics.as_deref().unwrap_or(&[]);
 
     if requested.is_empty() {
         return cache
-            .list_topics_by_tenant(DEFAULT_TENANT)
+            .list_topics_by_tenant(get_tenant())
             .into_iter()
-            .map(topic_to_metadata)
+            .map(|topic| topic_to_metadata(topic, sdm))
             .collect();
     }
 
     requested
         .iter()
         .filter_map(|t| t.name.clone())
-        .map(
-            |name| match cache.get_topic_by_name(DEFAULT_TENANT, &name) {
-                Some(topic) => topic_to_metadata(topic),
-                None => MetadataResponseTopic::default()
-                    .with_error_code(UNKNOWN_TOPIC_OR_PARTITION)
-                    .with_name(Some(name))
-                    .with_is_internal(false)
-                    .with_partitions(vec![]),
-            },
-        )
+        .map(|name| match cache.get_topic_by_name(get_tenant(), &name) {
+            Some(topic) => topic_to_metadata(topic, sdm),
+            None => MetadataResponseTopic::default()
+                .with_error_code(ResponseError::UnknownTopicOrPartition.code())
+                .with_name(Some(name))
+                .with_is_internal(false)
+                .with_partitions(vec![]),
+        })
         .collect()
 }
 
-fn topic_to_metadata(topic: Topic) -> MetadataResponseTopic {
+fn topic_to_metadata(topic: Topic, sdm: &Arc<StorageDriverManager>) -> MetadataResponseTopic {
     let partitions = (0..topic.partition.max(1))
-        .map(|i| partition_metadata(i as i32))
+        .map(|i| partition_metadata(i as i32, &topic, sdm))
         .collect();
     MetadataResponseTopic::default()
         .with_error_code(0)
@@ -120,11 +115,65 @@ fn topic_to_metadata(topic: Topic) -> MetadataResponseTopic {
         .with_partitions(partitions)
 }
 
-fn partition_metadata(partition_index: i32) -> MetadataResponsePartition {
+// Partition leader/replicas/ISR are read from the shard's active segment
+// (owned by storage-engine's ISR/leader-rebalance machinery) rather than
+// tracked separately here, so failover and rebalancing stay in sync
+// automatically. Falls back to broker 0 when the shard has no active
+// segment yet (e.g. topic storage type without ISR, or not yet created).
+fn partition_metadata(
+    partition_index: i32,
+    topic: &Topic,
+    sdm: &Arc<StorageDriverManager>,
+) -> MetadataResponsePartition {
+    let segment = topic
+        .storage_name_list
+        .get(&(partition_index as u32))
+        .and_then(|shard_name| {
+            sdm.engine_storage_handler
+                .cache_manager
+                .get_active_segment(shard_name)
+        });
+
+    let (leader_id, replica_nodes, isr_nodes) = match segment {
+        Some(segment) => (
+            segment.leader as i32,
+            segment
+                .replicas
+                .iter()
+                .map(|r| r.node_id as i32)
+                .collect::<Vec<_>>(),
+            segment
+                .isr
+                .iter()
+                .map(|&node_id| node_id as i32)
+                .collect::<Vec<_>>(),
+        ),
+        None => (0, vec![0], vec![0]),
+    };
+
     MetadataResponsePartition::default()
         .with_error_code(0)
         .with_partition_index(partition_index)
-        .with_leader_id(0.into())
-        .with_replica_nodes(vec![0.into()])
-        .with_isr_nodes(vec![0.into()])
+        .with_leader_id(leader_id.into())
+        .with_replica_nodes(replica_nodes.into_iter().map(Into::into).collect())
+        .with_isr_nodes(isr_nodes.into_iter().map(Into::into).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn split_host_port_parses_valid_addr() {
+        assert_eq!(
+            split_host_port("127.0.0.1:9092"),
+            Some(("127.0.0.1".to_string(), 9092))
+        );
+    }
+
+    #[test]
+    fn split_host_port_rejects_invalid_input() {
+        assert_eq!(split_host_port("no-port-here"), None);
+        assert_eq!(split_host_port("127.0.0.1:abc"), None);
+    }
 }

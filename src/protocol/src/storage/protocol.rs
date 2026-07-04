@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use bytes::Bytes;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Clone, Debug, PartialEq, Eq)]
@@ -278,7 +279,7 @@ impl WriteResp {
 pub struct ReadReqFilter {
     pub timestamp: Option<u64>,
     pub offset: Option<u64>,
-    pub key: Option<String>,
+    pub key: Option<Bytes>,
     pub tag: Option<String>,
 }
 
@@ -290,9 +291,9 @@ impl ReadReqFilter {
         }
     }
 
-    pub fn by_key(key: String) -> Self {
+    pub fn by_key(key: impl Into<Bytes>) -> Self {
         Self {
-            key: Some(key),
+            key: Some(key.into()),
             ..Default::default()
         }
     }
@@ -791,8 +792,11 @@ impl ShardOffsetResp {
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Clone, Debug, Default, PartialEq)]
 pub struct DeleteReqBody {
     pub shard_name: String,
-    pub keys: Vec<String>,
+    pub keys: Vec<Bytes>,
     pub offsets: Vec<u64>,
+    /// When set, delete all records with offset strictly less than this value
+    /// (Kafka DeleteRecords semantics) instead of using `keys`/`offsets`.
+    pub delete_before_offset: Option<u64>,
 }
 
 impl DeleteReqBody {
@@ -835,6 +839,8 @@ impl DeleteReq {
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Clone, Debug, Default, PartialEq)]
 pub struct DeleteRespBody {
     pub error_code: u32,
+    /// The low_watermark achieved after a `delete_before_offset` request.
+    pub achieved_offset: u64,
 }
 
 impl DeleteRespBody {

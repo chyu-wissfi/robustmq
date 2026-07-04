@@ -36,36 +36,22 @@ use crate::kafka::{
 
 #[derive(Clone)]
 pub struct KafkaHandlerCommand {
-    storage_driver_manager: Option<Arc<StorageDriverManager>>,
-    broker_cache: Option<Arc<NodeCacheManager>>,
+    storage_driver_manager: Arc<StorageDriverManager>,
+    broker_cache: Arc<NodeCacheManager>,
     // (connection_id, topic) -> per-shard offsets
     shard_offsets: ShardOffsets,
 }
 
 impl KafkaHandlerCommand {
-    pub fn new() -> Self {
-        KafkaHandlerCommand {
-            storage_driver_manager: None,
-            broker_cache: None,
-            shard_offsets: Arc::new(DashMap::new()),
-        }
-    }
-
-    pub fn new_with_storage(
+    pub fn new(
         storage_driver_manager: Arc<StorageDriverManager>,
         broker_cache: Arc<NodeCacheManager>,
     ) -> Self {
         KafkaHandlerCommand {
-            storage_driver_manager: Some(storage_driver_manager),
-            broker_cache: Some(broker_cache),
+            storage_driver_manager,
+            broker_cache,
             shard_offsets: Arc::new(DashMap::new()),
         }
-    }
-}
-
-impl Default for KafkaHandlerCommand {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -87,23 +73,31 @@ impl Command for KafkaHandlerCommand {
 
         let resp_packet = match &wrapper.packet {
             // Core Data Plane
-            KafkaPacket::ProduceReq(req) => core::process_produce(req),
+            KafkaPacket::ProduceReq(req) => {
+                core::process_produce(&self.storage_driver_manager, req).await
+            }
             KafkaPacket::FetchReq(req) => {
                 core::process_fetch(
-                    self.storage_driver_manager.as_ref(),
+                    &self.storage_driver_manager,
                     &self.shard_offsets,
                     req,
                     connection_id,
                 )
                 .await
             }
-            KafkaPacket::ListOffsetsReq(req) => core::process_list_offsets(req),
+            KafkaPacket::ListOffsetsReq(req) => {
+                core::process_list_offsets(&self.storage_driver_manager, req).await
+            }
             KafkaPacket::MetadataReq(req) => {
-                metadata::process_metadata(self.broker_cache.as_ref(), req)
+                metadata::process_metadata(&self.broker_cache, &self.storage_driver_manager, req)
             }
             // Consumer Group Management
-            KafkaPacket::OffsetCommitReq(req) => consumer_group::process_offset_commit(req),
-            KafkaPacket::OffsetFetchReq(req) => consumer_group::process_offset_fetch(req),
+            KafkaPacket::OffsetCommitReq(req) => {
+                consumer_group::process_offset_commit(&self.storage_driver_manager, req).await
+            }
+            KafkaPacket::OffsetFetchReq(req) => {
+                consumer_group::process_offset_fetch(&self.storage_driver_manager, req).await
+            }
             KafkaPacket::FindCoordinatorReq(req) => find_coordinator::process_find_coordinator(req),
             KafkaPacket::JoinGroupReq(req) => consumer_group::process_join_group(req),
             KafkaPacket::HeartbeatReq(req) => consumer_group::process_heartbeat(req),
@@ -118,10 +112,18 @@ impl Command for KafkaHandlerCommand {
             KafkaPacket::ApiVersionReq(_) => api_versions::process_api_versions(),
             KafkaPacket::SaslAuthenticateReq(req) => auth::process_sasl_authenticate(req),
             // Topic / Partition Management
-            KafkaPacket::CreateTopicsReq(req) => topic::process_create_topics(req),
-            KafkaPacket::DeleteTopicsReq(req) => topic::process_delete_topics(req),
-            KafkaPacket::DeleteRecordsReq(req) => topic::process_delete_records(req),
-            KafkaPacket::CreatePartitionsReq(req) => topic::process_create_partitions(req),
+            KafkaPacket::CreateTopicsReq(req) => {
+                topic::process_create_topics(&self.storage_driver_manager, req).await
+            }
+            KafkaPacket::DeleteTopicsReq(req) => {
+                topic::process_delete_topics(&self.storage_driver_manager, req).await
+            }
+            KafkaPacket::DeleteRecordsReq(req) => {
+                topic::process_delete_records(&self.storage_driver_manager, req).await
+            }
+            KafkaPacket::CreatePartitionsReq(req) => {
+                topic::process_create_partitions(&self.storage_driver_manager, req).await
+            }
             // Configuration Management
             KafkaPacket::DescribeConfigsReq(req) => config::process_describe_configs(req),
             KafkaPacket::AlterConfigsReq(req) => config::process_alter_configs(req),
@@ -243,15 +245,11 @@ impl Command for KafkaHandlerCommand {
     }
 }
 
-pub fn create_command() -> Arc<Box<dyn Command + Send + Sync>> {
-    Arc::new(Box::new(KafkaHandlerCommand::new()))
-}
-
-pub fn create_command_with_storage(
+pub fn create_command(
     storage_driver_manager: Arc<StorageDriverManager>,
     broker_cache: Arc<NodeCacheManager>,
 ) -> Arc<Box<dyn Command + Send + Sync>> {
-    Arc::new(Box::new(KafkaHandlerCommand::new_with_storage(
+    Arc::new(Box::new(KafkaHandlerCommand::new(
         storage_driver_manager,
         broker_cache,
     )))
